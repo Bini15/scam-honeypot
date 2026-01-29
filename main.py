@@ -28,46 +28,55 @@ def serve_ui():
 # Scam Analyzer
 # ==============================
 
-def analyze_scam(text: str):
-    text = text.lower()
+def analyze_scam(message):
+    msg = message.lower()
 
-    flags = []
+    red_flags = []
     risk = 0
+    scam_type = "Unknown"
 
-    keywords = {
-        "otp": 30,
-        "one time password": 30,
-        "pin": 30,
-        "atm": 25,
-        "card number": 25,
-        "account will be blocked": 20,
-        "account will be frozen": 20,
-        "urgent": 15,
-        "immediately": 15,
-        "verify": 10,
-        "bank": 5
-    }
+    # Keyword detection
+    if any(x in msg for x in ["otp", "one time password", "pin"]):
+        risk += 40
+        red_flags.append("Asking for OTP / PIN")
+        scam_type = "OTP Scam"
 
-    for k, score in keywords.items():
-        if k in text:
-            flags.append(k)
-            risk += score
+    if any(x in msg for x in ["kyc", "verify", "account blocked", "suspend"]):
+        risk += 30
+        red_flags.append("Fake KYC / Account Block Threat")
+        scam_type = "Bank KYC Scam"
 
-    if risk > 100:
-        risk = 100
+    if any(x in msg for x in ["upi", "refund", "collect request"]):
+        risk += 30
+        red_flags.append("UPI Refund Scam")
+        scam_type = "UPI Scam"
 
-    if risk >= 70:
-        scam_type = "Financial Fraud / Phishing"
-    elif risk >= 40:
-        scam_type = "Suspicious"
-    else:
-        scam_type = "Low Risk"
+    if any(x in msg for x in ["job", "offer", "work from home"]):
+        risk += 20
+        red_flags.append("Fake Job Offer")
+        scam_type = "Job Scam"
+
+    if any(x in msg for x in ["lottery", "won", "prize"]):
+        risk += 20
+        red_flags.append("Lottery / Prize Scam")
+        scam_type = "Lottery Scam"
+
+    if any(x in msg for x in ["click", "link", "http", "bit.ly"]):
+        risk += 20
+        red_flags.append("Suspicious Link")
+
+    # Cap risk at 100
+    risk = min(risk, 100)
+
+    if risk == 0:
+        scam_type = "No Scam Detected"
 
     return {
         "risk_score": risk,
         "scam_type": scam_type,
-        "red_flags": flags
+        "red_flags": red_flags
     }
+
 
 
 # =========================
@@ -166,10 +175,10 @@ def webhook(data: MessageIn):
 
 
     return {
-        "reply": reply,
-        "analysis": analysis,
-        "history": conversation_store[session_id]
-    }
+    "reply": reply,
+    "analysis": analysis
+}
+
 
 
 @app.post("/reset")
@@ -177,3 +186,6 @@ def reset_conversation(session_id: str = "default"):
     conversation_store[session_id] = [SYSTEM_PROMPT.copy()]
     return {"status": "reset done", "session_id": session_id}
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

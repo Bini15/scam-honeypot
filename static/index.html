@@ -10,11 +10,14 @@
 
     <h2>🛡️ Scam Detection Assistant</h2>
 
+    <div id="verdict"></div>
     <div id="chat"></div>
 
     <div class="input-box">
         <input id="messageInput" placeholder="Type message here..." />
-        <button onclick="sendMessage()">Send</button>
+        <button type="button" onclick="sendMessage()">Send</button>
+        <button onclick="clearChat()">🧹 Clear Chat</button>
+
     </div>
 
     <script src="/static/script.js"></script>
