@@ -146,6 +146,23 @@ def webhook(data: MessageIn):
     user_msg = data.message
     analysis = analyze_scam(user_msg)
     risk = analysis["risk_score"]
+    # ---------------- HARD OVERRIDE SCAM BLOCK ----------------
+    msg = user_msg.lower()
+
+    if any(x in msg for x in ["otp", "one time password", "pin"]) and any(x in msg for x in ["bank", "account", "blocked", "verify", "kyc"]):
+        analysis = {
+            "risk_score": 95,
+            "scam_type": "Bank Impersonation / OTP Scam",
+            "red_flags": ["Asking for OTP/PIN", "Bank impersonation", "Urgency tactic"]
+        }
+
+        reply = "🚨 SCAM DETECTED. This is a bank impersonation fraud. Do NOT share any OTP, PIN, or card details. Disconnect immediately and contact your bank via the official number."
+
+        return {
+            "reply": reply,
+            "analysis": analysis
+        }
+    # ---------------- END HARD OVERRIDE ----------------
 
 
     if session_id not in conversation_store:
