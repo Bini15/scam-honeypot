@@ -37,7 +37,7 @@ app = FastAPI()
 class IncomingMessage(BaseModel):
     sender: str
     text: str
-    timestamp: str
+    timestamp: str | int
 
 class ConversationItem(BaseModel):
     sender: str
