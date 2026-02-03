@@ -1,108 +1,113 @@
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
+from typing import List, Optional, Dict
 import requests
 import os
+import time
+import re
 from dotenv import load_dotenv
-
-# =========================
-# Setup
-# =========================
 
 load_dotenv()
 
+# =========================
+# CONFIG
+# =========================
+
 HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = os.getenv("API_KEY")  # your own secret
+GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 if not HF_TOKEN:
-    raise RuntimeError("HF_TOKEN not found in .env file")
+    raise RuntimeError("HF_TOKEN not found in env")
+
+if not API_KEY:
+    raise RuntimeError("API_KEY not found in env")
+
+# =========================
+# APP
+# =========================
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/")
-def serve_ui():
-    return FileResponse("static/index.html")
-
-# ==============================
-# Scam Analyzer
-# ==============================
-
-def analyze_scam(message):
-    msg = message.lower()
-
-    red_flags = []
-    risk = 0
-    scam_type = "Unknown"
-
-    # Keyword detection
-    if any(x in msg for x in ["otp", "one time password", "pin"]):
-        risk += 40
-        red_flags.append("Asking for OTP / PIN")
-        scam_type = "OTP Scam"
-
-    if any(x in msg for x in ["kyc", "verify", "account blocked", "suspend"]):
-        risk += 30
-        red_flags.append("Fake KYC / Account Block Threat")
-        scam_type = "Bank KYC Scam"
-
-    if any(x in msg for x in ["upi", "refund", "collect request"]):
-        risk += 30
-        red_flags.append("UPI Refund Scam")
-        scam_type = "UPI Scam"
-
-    if any(x in msg for x in ["job", "offer", "work from home"]):
-        risk += 20
-        red_flags.append("Fake Job Offer")
-        scam_type = "Job Scam"
-
-    if any(x in msg for x in ["lottery", "won", "prize"]):
-        risk += 20
-        red_flags.append("Lottery / Prize Scam")
-        scam_type = "Lottery Scam"
-
-    if any(x in msg for x in ["click", "link", "http", "bit.ly"]):
-        risk += 20
-        red_flags.append("Suspicious Link")
-
-    # Cap risk at 100
-    risk = min(risk, 100)
-
-    if risk == 0:
-        scam_type = "No Scam Detected"
-
-    return {
-        "risk_score": risk,
-        "scam_type": scam_type,
-        "red_flags": red_flags
-    }
-
-
 
 # =========================
-# In-memory conversation store
+# MODELS (MATCH JUDGE FORMAT)
 # =========================
 
-conversation_store = {}
+class IncomingMessage(BaseModel):
+    sender: str
+    text: str
+    timestamp: str
+
+class ConversationItem(BaseModel):
+    sender: str
+    text: str
+    timestamp: str
+
+class IncomingPayload(BaseModel):
+    sessionId: str
+    message: IncomingMessage
+    conversationHistory: List[ConversationItem] = []
+    metadata: Optional[Dict] = {}
+
+# =========================
+# MEMORY STORE
+# =========================
+
+sessions = {}
+
+# =========================
+# SYSTEM PROMPT
+# =========================
 
 SYSTEM_PROMPT = {
     "role": "system",
-    "content": "You are a human pretending to be a bank customer. Reply naturally, cautiously, and do not reveal sensitive information easily."
+    "content": "You are a real Indian bank customer. You are cautious, a bit confused, and protective of your money. You do not trust easily. You never share OTP or PIN easily. You ask questions."
 }
 
 # =========================
-# Request Models
+# SCAM DETECTOR
 # =========================
 
-class MessageIn(BaseModel):
-    message: str
-    session_id: str | None = "default"
+def detect_scam(text: str):
+    msg = text.lower()
+
+    risk = 0
+    flags = []
+
+    if any(x in msg for x in ["otp", "one time password", "pin"]):
+        risk += 50
+        flags.append("OTP/PIN Request")
+
+    if any(x in msg for x in ["account blocked", "kyc", "verify", "suspend"]):
+        risk += 30
+        flags.append("Urgency / Account Threat")
+
+    if any(x in msg for x in ["click", "http", "bit.ly"]):
+        risk += 20
+        flags.append("Suspicious Link")
+
+    risk = min(risk, 100)
+
+    return risk, flags
 
 # =========================
-# HuggingFace AI Call
+# INTELLIGENCE EXTRACTOR
 # =========================
 
-def ai_agent_reply(history: list) -> str:
+def extract_intel(text: str):
+    return {
+        "bankAccounts": re.findall(r"\b\d{9,18}\b", text),
+        "upiIds": re.findall(r"\b[\w.-]+@[\w.-]+\b", text),
+        "phishingLinks": re.findall(r"https?://\S+", text),
+        "phoneNumbers": re.findall(r"\+?\d{10,13}", text),
+        "suspiciousKeywords": [k for k in ["otp", "verify", "urgent", "blocked", "kyc", "refund"] if k in text.lower()]
+    }
+
+# =========================
+# AI AGENT
+# =========================
+
+def ai_reply(history):
     url = "https://router.huggingface.co/v1/chat/completions"
 
     headers = {
@@ -114,95 +119,128 @@ def ai_agent_reply(history: list) -> str:
         "model": "HuggingFaceH4/zephyr-7b-beta:featherless-ai",
         "messages": history,
         "temperature": 0.7,
-        "max_tokens": 300
+        "max_tokens": 250
     }
 
-    response = requests.post(url, headers=headers, json=payload)
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
 
-    print("HF STATUS:", response.status_code)
-    print("HF RAW RESPONSE:", response.text)
+    if r.status_code != 200:
+        return "I'm sorry, network seems busy. Can you repeat?"
 
-    if response.status_code != 200:
-        return f"HuggingFace API error: {response.text}"
-
-    data = response.json()
-
-    if "choices" not in data:
-        return f"Unexpected HF response: {data}"
-
+    data = r.json()
     return data["choices"][0]["message"]["content"]
 
 # =========================
-# Routes
+# FINAL CALLBACK
 # =========================
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
+def send_to_guvi(sessionId, session):
+    payload = {
+        "sessionId": sessionId,
+        "scamDetected": True,
+        "totalMessagesExchanged": session["totalMessages"],
+        "extractedIntelligence": session["intel"],
+        "agentNotes": "Scammer used urgency, impersonation and attempted data theft"
+    }
+
+    try:
+        requests.post(GUVI_CALLBACK_URL, json=payload, timeout=5)
+    except:
+        pass
+
+# =========================
+# MAIN ENDPOINT
+# =========================
 
 @app.post("/webhook")
-def webhook(data: MessageIn):
-    session_id = data.session_id
-    user_msg = data.message
-    analysis = analyze_scam(user_msg)
-    risk = analysis["risk_score"]
-    # ---------------- HARD OVERRIDE SCAM BLOCK ----------------
-    msg = user_msg.lower()
+def webhook(payload: IncomingPayload, x_api_key: str = Header(None)):
 
-    if any(x in msg for x in ["otp", "one time password", "pin"]) and any(x in msg for x in ["bank", "account", "blocked", "verify", "kyc"]):
-        analysis = {
-            "risk_score": 95,
-            "scam_type": "Bank Impersonation / OTP Scam",
-            "red_flags": ["Asking for OTP/PIN", "Bank impersonation", "Urgency tactic"]
+    # 🔐 API KEY CHECK
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+
+    sessionId = payload.sessionId
+    msg = payload.message.text
+
+    # Create session if new
+    if sessionId not in sessions:
+        sessions[sessionId] = {
+            "startTime": time.time(),
+            "history": [SYSTEM_PROMPT.copy()],
+            "intel": {
+                "bankAccounts": [],
+                "upiIds": [],
+                "phishingLinks": [],
+                "phoneNumbers": [],
+                "suspiciousKeywords": []
+            },
+            "totalMessages": 0,
+            "scamDetected": False,
+            "finished": False,
+            "stage": "init"
         }
 
-        reply = "🚨 SCAM DETECTED. This is a bank impersonation fraud. Do NOT share any OTP, PIN, or card details. Disconnect immediately and contact your bank via the official number."
+    session = sessions[sessionId]
 
-        return {
-            "reply": reply,
-            "analysis": analysis
-        }
-    # ---------------- END HARD OVERRIDE ----------------
+    # Add scammer message
+    session["history"].append({"role": "user", "content": msg})
+    session["totalMessages"] += 1
 
+    # Detect scam
+    risk, flags = detect_scam(msg)
 
-    if session_id not in conversation_store:
-        conversation_store[session_id] = [SYSTEM_PROMPT.copy()]
+    if risk >= 50:
+        session["scamDetected"] = True
 
-    # Add user message
-    conversation_store[session_id].append({
-        "role": "user",
-        "content": user_msg
-    })
+    # Extract intelligence
+    intel = extract_intel(msg)
+    for k in session["intel"]:
+        session["intel"][k].extend(intel[k])
 
-    # Get AI reply
-    if risk >= 60:
-        reply = "⚠️ WARNING: This is almost certainly a scam. Do NOT share any OTP, PIN, or card details. Please disconnect the call immediately and contact your bank using the official number."
-    elif risk >= 30:
-        reply = ai_agent_reply(conversation_store[session_id])
-        reply = "⚠️ Be cautious. This looks suspicious.\n\n" + reply
+    # =========================
+    # 🤖 AGENT LOGIC (NO REPEAT)
+    # =========================
+
+    if session["scamDetected"] and session["stage"] == "init":
+        reply = (
+            "This sounds serious. I'm really worried now. "
+            "Can you tell me which bank this is and "
+            "why this issue has suddenly come up?"
+        )
+        session["stage"] = "engaging"
+
+    elif session["scamDetected"] and session["stage"] == "engaging":
+        reply = ai_reply(session["history"])
+
     else:
-        reply = ai_agent_reply(conversation_store[session_id])
+        reply = "Sorry, I didn’t understand. Can you explain again?"
 
-    # Add AI reply to history
-    conversation_store[session_id].append({
-        "role": "assistant",
-        "content": reply
-    })
+    # Save assistant reply
+    session["history"].append({"role": "assistant", "content": reply})
+    session["totalMessages"] += 1
 
+    # =========================
+    # 🚨 FINAL CALLBACK
+    # =========================
 
+    if session["scamDetected"] and session["totalMessages"] >= 12 and not session["finished"]:
+        session["finished"] = True
+        send_to_guvi(sessionId, session)
 
     return {
-    "reply": reply,
-    "analysis": analysis
-}
+        "status": "success",
+        "scamDetected": session["scamDetected"],
+        "engagementMetrics": {
+            "engagementDurationSeconds": int(time.time() - session["startTime"]),
+            "totalMessagesExchanged": session["totalMessages"]
+        },
+        "extractedIntelligence": session["intel"],
+        "agentNotes": "Agentic honeypot engaging scammer and extracting intelligence"
+    }
 
-
-
-@app.post("/reset")
-def reset_conversation(session_id: str = "default"):
-    conversation_store[session_id] = [SYSTEM_PROMPT.copy()]
-    return {"status": "reset done", "session_id": session_id}
-
+@app.get("/")
+def health():
+    return {"status": "ok"}
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
