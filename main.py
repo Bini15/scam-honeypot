@@ -42,7 +42,7 @@ class IncomingMessage(BaseModel):
 class ConversationItem(BaseModel):
     sender: str
     text: str
-    timestamp: str
+    timestamp: str | int
 
 class IncomingPayload(BaseModel):
     sessionId: str
